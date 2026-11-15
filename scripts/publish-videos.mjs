@@ -14,7 +14,13 @@ const sources = JSON.parse(await readFile(sourceFile, 'utf8'));
 const catalog = JSON.parse(await readFile(path.join(root, 'data/catalog.json'), 'utf8'));
 const work = path.join(path.dirname(path.resolve(sourceFile)), 'release-assets');
 const repo = catalog.repository;
-async function api(args) { return JSON.parse((await run('gh', ['api', ...args], { maxBuffer: 8e6 })).stdout); }
+async function api(args) {
+  const attempts = args.includes('POST') ? 1 : 3;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try { return JSON.parse((await run('gh', ['api', ...args], { maxBuffer: 8e6 })).stdout); }
+    catch (error) { if (attempt === attempts || /HTTP 4\d\d/.test(error.stderr || '')) throw error; await new Promise(resolve => setTimeout(resolve, 700)); }
+  }
+}
 async function hash(file) { const h = createHash('sha256'); for await (const chunk of createReadStream(file)) h.update(chunk); return h.digest('hex'); }
 const existingReleases = [];
 for (let page = 1; ; page++) {
@@ -30,11 +36,23 @@ for (const project of catalog.projects) {
     const credits = await Promise.all(project.credits.map(async id => {
       const text = await readFile(path.join(root, 'credits', `${id}.md`), 'utf8');
       const link = `https://github.com/${repo}/blob/main/credits/${id}.md`;
-      return text.length <= 12000 ? text : text.slice(0, 12000) + `\n\n完整署名记录：${link}\n同一记录也作为本发布的 CREDITS.md 附件保存。\n`;
+      return text.length <= 3000 ? text : text.slice(0, 3000) + `\n\n完整署名记录：${link}\n同一记录也作为本发布的 CREDITS.md 附件保存。\n`;
     }));
     const body = `${project.description}\n\n项目页：https://charlo.cn/video-library/videos/${project.id}/\n${project.interactiveUrl ? `交互体验：${project.interactiveUrl}\n` : ''}\n本发布保存原始成片，网页上的压缩预览另行发布。\n\n` + project.videos.map(v => `- ${v.title} · ${v.width} × ${v.height} · ${v.duration}s · ${(v.bytes / 1e6).toFixed(1)} MB`).join('\n') + (credits.some(Boolean) ? '\n\n来源与署名\n\n' + credits.filter(Boolean).join('\n\n') : '') + '\n\n校验文件见 SHA256SUMS.txt；没有为第三方内容重新授予许可证。\n';
     const notes = path.join(dir, 'notes.md'); await writeFile(notes, body);
-    release = await api(['--method', 'POST', `repos/${repo}/releases`, '-f', `tag_name=${project.releaseTag}`, '-f', 'target_commitish=main', '-F', 'draft=true', '-f', `name=${project.title} · v${project.version}`, '-F', `body=@${notes}`]);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        release = await api(['--method', 'POST', `repos/${repo}/releases`, '-f', `tag_name=${project.releaseTag}`, '-f', 'target_commitish=main', '-F', 'draft=true', '-f', `name=${project.title} · v${project.version}`, '-F', `body=@${notes}`]);
+        break;
+      } catch (error) {
+        // Resolve an uncertain POST before another creation attempt.
+        const current = await api([`repos/${repo}/releases?per_page=100`]);
+        release = current.find(item => item.tag_name === project.releaseTag);
+        if (release) break;
+        if (attempt === 3 || /HTTP 4\d\d/.test(error.stderr || '')) throw error;
+        console.log(`RETRY release ${project.id} attempt ${attempt + 1}`);
+      }
+    }
   }
   states.set(project.id, { project, release, dir, complete: 0 });
   const sourceProject = sources.find(p => p.id === project.id);

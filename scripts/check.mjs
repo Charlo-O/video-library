@@ -7,6 +7,9 @@ import path from 'node:path';
 const root = path.resolve(fileURLToPath(new URL('../', import.meta.url)));
 const dist = path.join(root, 'dist');
 const catalog = JSON.parse(await readFile(path.join(root, 'data/catalog.json'), 'utf8'));
+let publication;
+try { publication = JSON.parse(await readFile(path.join(root, 'data/publication.json'), 'utf8')); }
+catch (error) { if (error.code !== 'ENOENT') throw error; }
 const files = [];
 async function walk(dir) { for (const entry of await readdir(dir, { withFileTypes: true })) { const p = path.join(dir, entry.name); entry.isDirectory() ? await walk(p) : files.push(p); } }
 await walk(dist);
@@ -35,6 +38,12 @@ for (const p of catalog.projects) {
   assert.ok(!seen.has(p.id)); seen.add(p.id);
   assert.match(p.releaseTag, /^[\w-]+-v\d+\.\d+\.\d+$/);
   assert.ok(!JSON.stringify(p).includes('/Volumes/'), 'Local source paths must not be published');
+  if (publication) {
+    const released = publication.projects.find(project => project.id === p.id);
+    assert.equal(released?.tag, p.releaseTag, `Publish originals before deploying ${p.id}`);
+    assert.equal(released.videos, p.videos.length, `Release film count mismatch: ${p.id}`);
+    assert.equal(released.verifiedBytes, p.videos.reduce((sum, video) => sum + video.bytes, 0), `Release byte count mismatch: ${p.id}`);
+  }
   for (const v of p.videos) {
     const size = (await stat(path.join(dist, v.preview))).size;
     assert.equal(size, v.previewBytes);
