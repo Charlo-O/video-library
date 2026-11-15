@@ -1,6 +1,7 @@
 (() => {
   const project = JSON.parse(document.querySelector('#project-data').textContent);
   const player = document.querySelector('#player');
+  const start = document.querySelector('#start-preview');
   const error = document.querySelector('#playback-error');
   const buttons = [...document.querySelectorAll('[data-index]')];
   const time = n => { const value = Math.round(n); return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`; };
@@ -11,6 +12,7 @@
     player.poster = `../../${video.poster}`;
     player.src = `../../${video.preview}`;
     player.load();
+    start.hidden = false;
     error.hidden = true;
     buttons.forEach(button => { const active = Number(button.dataset.index) === index; button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active)); });
     set('#preview-kind', video.previewComplete ? '完整内容压缩预览' : `${time(video.previewDuration)} 精选画面预览 · 无声`);
@@ -24,6 +26,9 @@
   }
   buttons.forEach(button => button.addEventListener('click', () => choose(Number(button.dataset.index))));
   player.addEventListener('error', () => { error.hidden = false; });
+  player.addEventListener('playing', () => { start.hidden = true; });
+  player.addEventListener('ended', () => { start.hidden = false; });
+  start.addEventListener('click', () => { player.play().catch(() => { error.hidden = false; }); });
   document.querySelector('#retry-player').addEventListener('click', () => { error.hidden = true; player.load(); player.play().catch(() => { error.hidden = false; }); });
   const initial = new URLSearchParams(location.search).get('film');
   const index = project.videos.findIndex(video => video.id === initial);

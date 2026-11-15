@@ -6,7 +6,8 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-const run = promisify(execFile);
+const execute = promisify(execFile);
+const run = (command, args, options = {}) => execute(command, args, { timeout: args.some(arg => arg.endsWith('.mp4')) ? 1_800_000 : 90_000, ...options });
 const root = fileURLToPath(new URL('../', import.meta.url));
 const sourceFile = process.argv[2];
 if (!sourceFile) throw new Error('Usage: node scripts/publish-videos.mjs /absolute/private-sources.json');
@@ -15,10 +16,10 @@ const catalog = JSON.parse(await readFile(path.join(root, 'data/catalog.json'), 
 const work = path.join(path.dirname(path.resolve(sourceFile)), 'release-assets');
 const repo = catalog.repository;
 async function api(args) {
-  const attempts = args.includes('POST') ? 1 : 3;
+  const attempts = args.includes('POST') ? 1 : 5;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try { return JSON.parse((await run('gh', ['api', ...args], { maxBuffer: 8e6 })).stdout); }
-    catch (error) { if (attempt === attempts || /HTTP 4\d\d/.test(error.stderr || '')) throw error; await new Promise(resolve => setTimeout(resolve, 700)); }
+    catch (error) { if (attempt === attempts || /HTTP 4\d\d/.test(error.stderr || '')) throw error; await new Promise(resolve => setTimeout(resolve, Math.min(8000, 1000 * 2 ** (attempt - 1)))); }
   }
 }
 async function hash(file) { const h = createHash('sha256'); for await (const chunk of createReadStream(file)) h.update(chunk); return h.digest('hex'); }
@@ -106,8 +107,18 @@ for (const { project, dir } of states.values()) {
     await writeFile(credits, (await Promise.all(project.credits.map(id => readFile(path.join(root, 'credits', `${id}.md`), 'utf8')))).join('\n\n---\n\n'));
     attachments.push(credits);
   }
-  await run('gh', ['release', 'upload', project.releaseTag, ...attachments, '--repo', repo, '--clobber']);
-  const full = JSON.parse((await run('gh', ['api', `repos/${repo}/releases/${states.get(project.id).release.id}`])).stdout);
+  let metadataMatches = true;
+  for (const file of attachments) {
+    const asset = states.get(project.id).release.assets.find(asset => asset.name === path.basename(file));
+    if (!asset || asset.state !== 'uploaded' || asset.size !== (await stat(file)).size || asset.digest !== `sha256:${await hash(file)}`) metadataMatches = false;
+  }
+  if (!metadataMatches) {
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try { await run('gh', ['release', 'upload', project.releaseTag, ...attachments, '--repo', repo, '--clobber']); break; }
+      catch (error) { if (attempt === 5) throw error; console.log(`RETRY metadata ${project.id} attempt ${attempt + 1}`); await new Promise(resolve => setTimeout(resolve, Math.min(8000, 1000 * 2 ** (attempt - 1)))); }
+    }
+  }
+  const full = metadataMatches ? states.get(project.id).release : await api([`repos/${repo}/releases/${states.get(project.id).release.id}`]);
   for (const video of project.videos) {
     const asset = full.assets.find(asset => asset.name === video.assetName);
     if (!asset || asset.size !== video.bytes) throw new Error(`Uploaded size mismatch: ${project.id}/${video.id}`);

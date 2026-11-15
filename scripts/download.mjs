@@ -1,13 +1,14 @@
 import { readFile, mkdir, rename, unlink, stat } from 'node:fs/promises';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { Readable, Transform } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import path from 'node:path';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+const run = promisify(execFile);
 const args = process.argv.slice(2);
 const ids = [];
 let all = false;
@@ -48,7 +49,7 @@ const unknown = uniqueIds.filter(id => !byId.has(id));
 if (unknown.length) throw new Error(`Unknown project id: ${unknown.join(', ')}`);
 const projects = all ? catalog.projects : uniqueIds.map(id => byId.get(id));
 const maxRetries = 3;
-const timeoutMs = 180_000;
+const minimumTimeoutMs = 180_000;
 
 async function matchesExisting(file, video) {
   let info;
@@ -67,32 +68,37 @@ function retryable(error) {
 }
 
 async function download(video, final) {
+  if (new URL(video.downloadUrl).protocol !== 'https:') throw new Error('Original video URLs must use HTTPS');
+  const timeoutMs = Math.max(minimumTimeoutMs, Math.ceil(video.bytes / (512 * 1024) * 1000) + 30_000);
   // A valid existing final is never removed. Replacement happens only after
   // the newly downloaded temporary file passes size and SHA-256 checks.
   const temp = `${final}.partial-${randomUUID()}`;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const response = await fetch(video.downloadUrl, { signal: AbortSignal.timeout(timeoutMs) });
-      if (!response.ok) {
-        await response.body?.cancel();
-        const error = new Error(`HTTP ${response.status}: ${video.downloadUrl}`);
-        error.retryable = [408, 425, 429].includes(response.status) || response.status >= 500;
+      // curl honors HTTPS_PROXY / ALL_PROXY and the system certificate store.
+      // Disable user curlrc so TLS verification cannot be disabled by a preset.
+      const curlArgs = ['--disable', '--fail', '--location', '--silent', '--show-error',
+        '--proto', '=https', '--proto-redir', '=https', '--max-redirs', '8',
+        '--connect-timeout', '30', '--max-time', String(Math.ceil(timeoutMs / 1000)),
+        '--output', temp, '--write-out', '%{http_code}', '--', video.downloadUrl];
+      let status;
+      try {
+        const result = await run('curl', curlArgs, { timeout: timeoutMs + 10_000, maxBuffer: 256 * 1024 });
+        status = Number(result.stdout.trim());
+      } catch (cause) {
+        if (cause.code === 'ENOENT') throw new Error('curl is required to download originals. Install curl and retry.', { cause });
+        status = Number(String(cause.stdout || '').trim());
+        const error = new Error(status >= 400 ? `HTTP ${status}: ${video.downloadUrl}` : `curl failed (${cause.code ?? cause.signal}): ${String(cause.stderr || cause.message).trim()}`, { cause });
+        error.retryable = [408, 425, 429].includes(status) || status >= 500
+          || [5, 6, 7, 18, 28, 35, 52, 55, 56, 92, 95].includes(cause.code) || cause.killed === true;
         throw error;
       }
-      if (!response.body) {
-        const error = new Error(`Empty response: ${video.downloadUrl}`);
+      if (!(status >= 200 && status < 300)) {
+        const error = new Error(`Unexpected HTTP ${status}: ${video.downloadUrl}`);
         error.retryable = false;
         throw error;
       }
-      const hash = createHash('sha256');
-      let size = 0;
-      const meter = new Transform({ transform(chunk, encoding, callback) {
-        size += chunk.length;
-        hash.update(chunk);
-        callback(null, chunk);
-      } });
-      await pipeline(Readable.fromWeb(response.body), meter, createWriteStream(temp));
-      if (size !== video.bytes || hash.digest('hex') !== video.sha256) {
+      if (!(await matchesExisting(temp, video))) {
         const error = new Error(`Checksum mismatch: ${video.assetName}`);
         error.retryable = false;
         throw error;
@@ -116,7 +122,7 @@ for (const project of projects) {
   for (const video of project.videos) {
     const final = path.join(dir, video.assetName);
     if (await matchesExisting(final, video)) {
-      console.log(`EXISTS ${project.id}/${video.id} · SHA-256 verified`);
+      console.log(`SKIP ${project.id}/${video.id} · size and SHA-256 verified`);
       continue;
     }
     console.log(`Downloading ${project.id}/${video.id} (${(video.bytes / 1e6).toFixed(1)} MB)`);

@@ -8,3 +8,6 @@ test-results/
 *.log
 *.partial
 sources.local.json
+state/
+release-assets/
+*.partial-*

@@ -16,7 +16,7 @@
 
 ## 下载原片
 
-需要 Node.js 22 或更新版本，无需安装运行依赖。
+需要 Node.js 22 或更新版本及系统 curl，无需安装 npm 依赖。下载会继承系统代理设置，并保持 HTTPS 证书校验。
 
 ```sh
 npm run download -- ripples watercat
@@ -42,7 +42,7 @@ npm run dev
 4. `npm run publish-videos -- /absolute/private-sources.json`：通过已登录的 GitHub CLI 上传原片、校验清单和版本记录；附件校验通过后公开发布。
 5. 推送 main 后，GitHub Actions 构建、检查并统一部署 Pages。构建不重复编码视频。
 
-当前导入脚本将首批作品发布为 `项目ID-v1.0.0`。发布新作品版本时应创建新标签与新文件名，保留旧版本下载地址；不要用同一标签替换不同成片。
+本地 `sources.local.json` 保存了首批来源路径，且被 Git 忽略。导入脚本将首批作品发布为 `项目ID-v1.0.0`。发布新作品版本时，在该项目清单中设置 `version`（例如 `1.1.0`），生成新标签与新文件名，保留旧版本下载地址。发布器会拒绝用同一已发布版本替换不同成片。
 
 ## 来源与范围
 
