@@ -27,7 +27,11 @@ for (const project of catalog.projects) {
   const dir = path.join(work, project.releaseTag); await mkdir(dir, { recursive: true });
   let release = existingReleases.find(release => release.tag_name === project.releaseTag);
   if (!release) {
-    const credits = await Promise.all(project.credits.map(async id => { try { return await readFile(path.join(root, 'credits', `${id}.md`), 'utf8'); } catch { return ''; } }));
+    const credits = await Promise.all(project.credits.map(async id => {
+      const text = await readFile(path.join(root, 'credits', `${id}.md`), 'utf8');
+      const link = `https://github.com/${repo}/blob/main/credits/${id}.md`;
+      return text.length <= 12000 ? text : text.slice(0, 12000) + `\n\n完整署名记录：${link}\n同一记录也作为本发布的 CREDITS.md 附件保存。\n`;
+    }));
     const body = `${project.description}\n\n项目页：https://charlo.cn/video-library/videos/${project.id}/\n${project.interactiveUrl ? `交互体验：${project.interactiveUrl}\n` : ''}\n本发布保存原始成片，网页上的压缩预览另行发布。\n\n` + project.videos.map(v => `- ${v.title} · ${v.width} × ${v.height} · ${v.duration}s · ${(v.bytes / 1e6).toFixed(1)} MB`).join('\n') + (credits.some(Boolean) ? '\n\n来源与署名\n\n' + credits.filter(Boolean).join('\n\n') : '') + '\n\n校验文件见 SHA256SUMS.txt；没有为第三方内容重新授予许可证。\n';
     const notes = path.join(dir, 'notes.md'); await writeFile(notes, body);
     release = await api(['--method', 'POST', `repos/${repo}/releases`, '-f', `tag_name=${project.releaseTag}`, '-f', 'target_commitish=main', '-F', 'draft=true', '-f', `name=${project.title} · v${project.version}`, '-F', `body=@${notes}`]);
@@ -78,7 +82,13 @@ for (const { project, dir } of states.values()) {
   const sums = path.join(dir, 'SHA256SUMS.txt');
   await writeFile(manifest, JSON.stringify({ id: project.id, title: project.title, version: project.version, videos: project.videos.map(({ id, title, assetName, duration, width, height, bytes, sha256 }) => ({ id, title, assetName, duration, width, height, bytes, sha256 })) }, null, 2));
   await writeFile(sums, project.videos.map(v => `${v.sha256}  ${v.assetName}`).join('\n') + '\n');
-  await run('gh', ['release', 'upload', project.releaseTag, manifest, sums, '--repo', repo, '--clobber']);
+  const attachments = [manifest, sums];
+  if (project.credits.length) {
+    const credits = path.join(dir, 'CREDITS.md');
+    await writeFile(credits, (await Promise.all(project.credits.map(id => readFile(path.join(root, 'credits', `${id}.md`), 'utf8')))).join('\n\n---\n\n'));
+    attachments.push(credits);
+  }
+  await run('gh', ['release', 'upload', project.releaseTag, ...attachments, '--repo', repo, '--clobber']);
   const full = JSON.parse((await run('gh', ['api', `repos/${repo}/releases/${states.get(project.id).release.id}`])).stdout);
   for (const video of project.videos) {
     const asset = full.assets.find(asset => asset.name === video.assetName);
